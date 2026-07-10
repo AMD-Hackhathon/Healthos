@@ -115,7 +115,7 @@ def generate_chat_reply(
         db.query(ChatMessage)
         .filter_by(user_id=user_id)
         .order_by(ChatMessage.created_at.desc())
-        .limit(20)
+        .limit(8)
         .all()
     )
     history.reverse()
@@ -128,7 +128,7 @@ def generate_chat_reply(
             MedicalEntry.created_at.desc(),
             MedicalEntry.term.asc(),
         )
-        .limit(30)
+        .limit(8)
         .all()
     )
     report = None
@@ -185,9 +185,9 @@ def _analyze_report_with_fireworks(text: str) -> dict[str, Any] | None:
         "summary, risk_level, flagged_values. risk_level must be normal, advice, "
         "or urgent. flagged_values items need term, value, unit, status. Use "
         "snake_case terms and keep values as strings.\n\n"
-        f"Report text:\n{text[:12000]}"
+        f"Report text:\n{text[:8000]}"
     )
-    content = _fireworks_chat(prompt, max_tokens=900)
+    content = _fireworks_chat(prompt, max_tokens=650)
     if not content:
         return None
     return _json_from_text(content)
@@ -205,9 +205,9 @@ def _chat_with_fireworks(
 
     context = {
         "profile": _profile_dict(profile),
-        "recent_entries": [_entry_dict(e) for e in entries[:20]],
+        "recent_entries": [_entry_dict(e) for e in entries[:8]],
         "report": _report_dict(report),
-        "history": [{"role": h.role, "content": h.content} for h in history[-10:]],
+        "history": [{"role": h.role, "content": h.content} for h in history[-8:]],
     }
     prompt = (
         "You are HealthOS assistant. Use only the supplied user health context. "
@@ -217,7 +217,7 @@ def _chat_with_fireworks(
         f"Context JSON:\n{json.dumps(context, default=str)}\n\n"
         f"User message: {message}"
     )
-    return _fireworks_chat(prompt, max_tokens=500)
+    return _fireworks_chat(prompt, max_tokens=300)
 
 
 def _fireworks_chat(prompt: str, max_tokens: int) -> str | None:
