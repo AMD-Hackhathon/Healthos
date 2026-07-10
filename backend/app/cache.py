@@ -54,6 +54,9 @@ response_cache: TTLCache[tuple[object, ...], object] = TTLCache(
     ttl_seconds=60, max_size=512
 )
 ai_cache: TTLCache[tuple[object, ...], str] = TTLCache(ttl_seconds=300, max_size=128)
+report_analysis_cache: TTLCache[tuple[object, ...], object] = TTLCache(
+    ttl_seconds=3600, max_size=128
+)
 
 
 def invalidate_user_cache(user_id: object) -> None:

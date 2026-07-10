@@ -15,6 +15,7 @@ os.environ["FIREWORKS_API_KEY"] = ""
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import app.ai_tools as ai_tools  # noqa: E402
 from app.main import app  # noqa: E402
 
 
@@ -114,3 +115,16 @@ def test_auth_profile_report_dashboard_and_chat_flow():
         },
     )
     assert missing_report.status_code == 404
+
+
+def test_image_report_text_uses_ocr(monkeypatch, tmp_path):
+    image_path = tmp_path / "report.png"
+    image_path.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"
+        b"\x00\x00\x00\x90wS\xde"
+    )
+
+    monkeypatch.setattr(ai_tools, "_extract_image_text_with_ocr", lambda path: "LDL 145")
+
+    assert ai_tools.extract_report_text(str(image_path)) == "LDL 145"

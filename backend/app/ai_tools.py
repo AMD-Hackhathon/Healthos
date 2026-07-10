@@ -13,7 +13,7 @@ from urllib import error, request
 from langchain.tools import tool
 from sqlalchemy.orm import Session
 
-from app.cache import ai_cache
+from app.cache import ai_cache, report_analysis_cache
 from app.config import settings
 from app.database import SessionLocal
 from app.models import ChatMessage, HealthProfile, MedicalEntry, Report
@@ -44,6 +44,8 @@ KNOWN_TERMS = {
     "tsh": ("tsh", "mIU/L"),
 }
 
+IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+
 
 def extract_report_text(file_path: str) -> str:
     """Extract report text from common upload formats without changing routing."""
@@ -51,7 +53,13 @@ def extract_report_text(file_path: str) -> str:
     mime_type, _ = mimetypes.guess_type(path.name)
 
     if path.suffix.lower() == ".pdf" or mime_type == "application/pdf":
-        return _extract_pdf_text(path)
+        text = _extract_pdf_text(path)
+        return text if text.strip() else _extract_pdf_text_with_ocr(path)
+
+    if path.suffix.lower() in IMAGE_EXTENSIONS or (mime_type or "").startswith(
+        "image/"
+    ):
+        return _extract_image_text_with_ocr(path)
 
     try:
         return path.read_text(encoding="utf-8", errors="ignore")
@@ -60,19 +68,31 @@ def extract_report_text(file_path: str) -> str:
 
 
 def analyze_report(file_path: str) -> dict[str, Any]:
+    file_hash = _file_sha256(Path(file_path))
+    cache_key = ("report-analysis", file_hash) if file_hash else None
+    cached = report_analysis_cache.get(cache_key) if cache_key else None
+    if isinstance(cached, dict):
+        return cached
+
     text = extract_report_text(file_path)
     ai_result = _analyze_report_with_fireworks(text) if text.strip() else None
     if ai_result:
-        return _coerce_report_result(ai_result)
+        result = _coerce_report_result(ai_result)
+        if cache_key:
+            report_analysis_cache.set(cache_key, result)
+        return result
 
     values = _extract_medical_values(text)
     risk_level = _risk_from_values(values)
     summary = _report_summary(text, values, risk_level)
-    return {
+    result = {
         "summary": summary,
         "risk_level": risk_level,
         "flagged_values": values,
     }
+    if cache_key:
+        report_analysis_cache.set(cache_key, result)
+    return result
 
 
 def generate_health_summary(db: Session, user_id: uuid.UUID) -> None:
@@ -174,6 +194,61 @@ def _extract_pdf_text(path: Path) -> str:
         return "\n".join(page.extract_text() or "" for page in reader.pages)
     except Exception:
         return ""
+
+
+def _extract_pdf_text_with_ocr(path: Path) -> str:
+    try:
+        from pdf2image import convert_from_path
+    except ImportError:
+        return ""
+
+    pages_text: list[str] = []
+    try:
+        pages = convert_from_path(str(path), dpi=200, first_page=1, last_page=5)
+    except Exception:
+        return ""
+
+    for page in pages:
+        text = _ocr_image(page)
+        if text:
+            pages_text.append(text)
+    return "\n".join(pages_text)
+
+
+def _extract_image_text_with_ocr(path: Path) -> str:
+    try:
+        from PIL import Image
+    except ImportError:
+        return ""
+
+    try:
+        with Image.open(path) as image:
+            return _ocr_image(image)
+    except Exception:
+        return ""
+
+
+def _ocr_image(image: Any) -> str:
+    try:
+        import pytesseract
+    except ImportError:
+        return ""
+
+    try:
+        return pytesseract.image_to_string(image)
+    except Exception:
+        return ""
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        digest = sha256()
+        with path.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
 
 
 def _analyze_report_with_fireworks(text: str) -> dict[str, Any] | None:
