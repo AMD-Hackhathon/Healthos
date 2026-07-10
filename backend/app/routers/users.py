@@ -5,6 +5,7 @@ from pydantic import TypeAdapter
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.cache import invalidate_user_cache
 from app.database import get_db
 from app.models import HealthProfile, User
 from app.schemas import (
@@ -94,5 +95,6 @@ def update_profile(
         setattr(profile, field, value)
 
     db.commit()
+    invalidate_user_cache(current_user.id)
     db.refresh(profile)
     return get_profile(current_user, db)

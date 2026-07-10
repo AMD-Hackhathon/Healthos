@@ -4,6 +4,7 @@ import json
 import mimetypes
 import re
 import uuid
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from urllib import error, request
 from langchain.tools import tool
 from sqlalchemy.orm import Session
 
+from app.cache import ai_cache
 from app.config import settings
 from app.database import SessionLocal
 from app.models import ChatMessage, HealthProfile, MedicalEntry, Report
@@ -112,10 +114,11 @@ def generate_chat_reply(
     history = (
         db.query(ChatMessage)
         .filter_by(user_id=user_id)
-        .order_by(ChatMessage.created_at.asc())
+        .order_by(ChatMessage.created_at.desc())
         .limit(20)
         .all()
     )
+    history.reverse()
     profile = db.query(HealthProfile).filter_by(user_id=user_id).first()
     entries = (
         db.query(MedicalEntry)
@@ -135,7 +138,7 @@ def generate_chat_reply(
     db.add(ChatMessage(user_id=user_id, role="user", content=message))
     reply = _chat_with_fireworks(message, history, profile, entries, report)
     if not reply:
-        reply = _deterministic_chat_reply(message, profile, entries, report)
+        reply = _deterministic_chat_reply(message, history, profile, entries, report)
     db.add(ChatMessage(user_id=user_id, role="assistant", content=reply))
     db.commit()
     return reply
@@ -218,6 +221,16 @@ def _chat_with_fireworks(
 
 
 def _fireworks_chat(prompt: str, max_tokens: int) -> str | None:
+    cache_key = (
+        "fireworks",
+        settings.fireworks_model,
+        max_tokens,
+        sha256(prompt.encode("utf-8")).hexdigest(),
+    )
+    cached = ai_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     payload = {
         "model": settings.fireworks_model,
         "messages": [{"role": "user", "content": prompt}],
@@ -243,7 +256,10 @@ def _fireworks_chat(prompt: str, max_tokens: int) -> str | None:
     choices = body.get("choices") or []
     if not choices:
         return None
-    return choices[0].get("message", {}).get("content")
+    content = choices[0].get("message", {}).get("content")
+    if content:
+        ai_cache.set(cache_key, content)
+    return content
 
 
 def _json_from_text(text: str) -> dict[str, Any] | None:
@@ -467,10 +483,15 @@ def _summary_insights(
 
 def _deterministic_chat_reply(
     message: str,
+    history: list[ChatMessage],
     profile: HealthProfile | None,
     entries: list[MedicalEntry],
     report: Report | None,
 ) -> str:
+    memory_reply = _chat_memory_reply(message, history)
+    if memory_reply:
+        return memory_reply
+
     if not entries and not profile:
         return (
             "I do not have enough personal health data yet. Tell me your main concern, "
@@ -503,6 +524,32 @@ def _deterministic_chat_reply(
         "Your saved values do not show an obvious critical flag. Ask about a specific "
         "metric or time window if you want a more focused review."
     )
+
+
+def _chat_memory_reply(message: str, history: list[ChatMessage]) -> str | None:
+    normalized = message.strip().lower()
+    memory_terms = (
+        "previous",
+        "last",
+        "earlier",
+        "আগের",
+        "শেষ",
+        "আগে",
+        "কি জিজ্ঞেস",
+        "কী জিজ্ঞেস",
+        "what did i ask",
+        "what was my",
+    )
+    if not any(term in normalized for term in memory_terms):
+        return None
+
+    previous_user_messages = [
+        chat.content for chat in reversed(history) if chat.role == "user"
+    ]
+    if not previous_user_messages:
+        return "I do not have an earlier message from you in this chat yet."
+
+    return f'Your previous message was: "{previous_user_messages[0]}"'
 
 
 def _entry_dict(entry: MedicalEntry) -> dict[str, Any]:

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.ai_tools import analyze_report, generate_health_summary, utcnow
 from app.auth import get_current_user
+from app.cache import invalidate_user_cache, response_cache
 from app.database import get_db
 from app.models import MedicalEntry, Report, User
 from app.schemas import MedicalEntryResponse, ReportResponse, ReportUploadResponse
@@ -65,6 +66,7 @@ def upload_report(
     db.flush()
     generate_health_summary(db, current_user.id)
     db.commit()
+    invalidate_user_cache(current_user.id)
     db.refresh(report)
 
     return ReportUploadResponse(report_id=report.id, status=report.status)
@@ -76,6 +78,11 @@ def get_report(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    cache_key = ("report", str(current_user.id), str(report_id))
+    cached = response_cache.get(cache_key)
+    if isinstance(cached, ReportResponse):
+        return cached
+
     report = db.query(Report).filter_by(id=report_id, user_id=current_user.id).first()
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -87,7 +94,7 @@ def get_report(
         .all()
     )
 
-    return ReportResponse(
+    response = ReportResponse(
         id=report.id,
         status=report.status,
         summary=report.summary,
@@ -95,3 +102,5 @@ def get_report(
         created_at=report.created_at,
         flagged_values=[MedicalEntryResponse.model_validate(e) for e in flagged_values],
     )
+    response_cache.set(cache_key, response)
+    return response

@@ -97,6 +97,14 @@ def test_auth_profile_report_dashboard_and_chat_flow():
     assert chat.status_code == 200
     assert "ldl_cholesterol" in chat.json()["reply"]
 
+    memory_chat = client.post(
+        "/api/chat",
+        headers=headers,
+        json={"message": "What was my previous message?"},
+    )
+    assert memory_chat.status_code == 200
+    assert "Review this report" in memory_chat.json()["reply"]
+
     missing_report = client.post(
         "/api/chat",
         headers=headers,
