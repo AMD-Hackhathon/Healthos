@@ -54,6 +54,7 @@ def upload_report(
         )
         db.add(entry)
 
+    db.flush()
     generate_health_summary(db, current_user.id)
     db.commit()
     db.refresh(report)

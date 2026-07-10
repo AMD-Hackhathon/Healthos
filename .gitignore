@@ -9,6 +9,7 @@ venv/
 
 # Uploaded files (runtime data, not source)
 uploads/
+*.db
 
 # Editor
 .vscode/
