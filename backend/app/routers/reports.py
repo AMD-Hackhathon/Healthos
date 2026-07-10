@@ -1,11 +1,10 @@
-import json
 import os
 import uuid
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
+from app.ai_tools import analyze_report, generate_health_summary, utcnow
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import MedicalEntry, Report, User
@@ -15,56 +14,6 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-
-def fake_generate_summary(db: Session, user_id: uuid.UUID) -> None:
-    """
-    STUB — placeholder until real AI scoring is wired in (LangChain/Fireworks).
-    Regenerates HealthSummary for a user. Called after new data is written.
-    """
-    import json as json_lib
-
-    from app.models import HealthSummary
-
-    insights = [
-        {"type": "status", "icon": "green", "text": "No critical issues detected."},
-        {
-            "type": "reminder",
-            "icon": "pill",
-            "text": "Placeholder reminder — real AI reasoning coming soon.",
-        },
-    ]
-
-    summary = db.query(HealthSummary).filter_by(user_id=user_id).first()
-    if not summary:
-        summary = HealthSummary(
-            user_id=user_id, health_score=85, insights=json_lib.dumps(insights)
-        )
-        db.add(summary)
-    else:
-        summary.health_score = 85
-        summary.insights = json_lib.dumps(insights)
-
-    db.commit()
-
-
-def fake_analyze_report() -> dict:
-    """
-    STUB — placeholder until the real OCR/AI pipeline is wired in.
-    Returns a shape matching what the real pipeline will eventually produce.
-    """
-    return {
-        "summary": "This is a placeholder summary. Real analysis coming soon.",
-        "risk_level": "advice",
-        "flagged_values": [
-            {
-                "term": "ldl_cholesterol",
-                "value": "145",
-                "unit": "mg/dL",
-                "status": "high",
-            },
-        ],
-    }
 
 
 @router.post("/upload", response_model=ReportUploadResponse, status_code=201)
@@ -86,8 +35,7 @@ def upload_report(
     db.commit()
     db.refresh(report)
 
-    # --- STUB: replace this block with the real OCR/AI call later ---
-    result = fake_analyze_report()
+    result = analyze_report(file_path)
 
     report.status = "complete"
     report.summary = result["summary"]
@@ -102,12 +50,11 @@ def upload_report(
             unit=item.get("unit"),
             status=item.get("status"),
             source="report_upload",
-            recorded_at=datetime.now(timezone.utc),
+            recorded_at=utcnow(),
         )
         db.add(entry)
-    # --- end stub ---
 
-    fake_generate_summary(db, current_user.id)
+    generate_health_summary(db, current_user.id)
     db.commit()
     db.refresh(report)
 
