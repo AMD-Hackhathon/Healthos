@@ -22,22 +22,22 @@ ADVICE_RISK = "advice"
 URGENT_RISK = "urgent"
 
 KNOWN_TERMS = {
-    "ldl": ("ldl_cholesterol", "mg/dL"),
     "ldl cholesterol": ("ldl_cholesterol", "mg/dL"),
-    "hdl": ("hdl_cholesterol", "mg/dL"),
+    "ldl": ("ldl_cholesterol", "mg/dL"),
     "hdl cholesterol": ("hdl_cholesterol", "mg/dL"),
+    "hdl": ("hdl_cholesterol", "mg/dL"),
     "total cholesterol": ("total_cholesterol", "mg/dL"),
     "triglycerides": ("triglycerides", "mg/dL"),
-    "glucose": ("glucose", "mg/dL"),
     "fasting glucose": ("glucose", "mg/dL"),
-    "a1c": ("hba1c", "%"),
-    "hba1c": ("hba1c", "%"),
+    "glucose": ("glucose", "mg/dL"),
     "hemoglobin a1c": ("hba1c", "%"),
-    "heart rate": ("heart_rate", "bpm"),
-    "pulse": ("heart_rate", "bpm"),
+    "hba1c": ("hba1c", "%"),
+    "a1c": ("hba1c", "%"),
     "systolic blood pressure": ("systolic_blood_pressure", "mmHg"),
     "diastolic blood pressure": ("diastolic_blood_pressure", "mmHg"),
     "blood pressure": ("blood_pressure", "mmHg"),
+    "heart rate": ("heart_rate", "bpm"),
+    "pulse": ("heart_rate", "bpm"),
     "hemoglobin": ("hemoglobin", "g/dL"),
     "tsh": ("tsh", "mIU/L"),
 }
@@ -80,7 +80,11 @@ def generate_health_summary(db: Session, user_id: uuid.UUID) -> None:
     entries = (
         db.query(MedicalEntry)
         .filter_by(user_id=user_id)
-        .order_by(MedicalEntry.recorded_at.desc())
+        .order_by(
+            MedicalEntry.recorded_at.desc(),
+            MedicalEntry.created_at.desc(),
+            MedicalEntry.term.asc(),
+        )
         .limit(50)
         .all()
     )
@@ -99,7 +103,7 @@ def generate_health_summary(db: Session, user_id: uuid.UUID) -> None:
         summary.health_score = health_score
         summary.insights = payload
 
-    db.commit()
+    db.flush()
 
 
 def generate_chat_reply(
@@ -116,7 +120,11 @@ def generate_chat_reply(
     entries = (
         db.query(MedicalEntry)
         .filter_by(user_id=user_id)
-        .order_by(MedicalEntry.recorded_at.desc())
+        .order_by(
+            MedicalEntry.recorded_at.desc(),
+            MedicalEntry.created_at.desc(),
+            MedicalEntry.term.asc(),
+        )
         .limit(30)
         .all()
     )
@@ -144,7 +152,11 @@ def get_user_medical_history(
             query = query.filter(MedicalEntry.recorded_at >= start_date)
         if end_date:
             query = query.filter(MedicalEntry.recorded_at <= end_date)
-        entries = query.order_by(MedicalEntry.recorded_at.desc()).all()
+        entries = query.order_by(
+            MedicalEntry.recorded_at.desc(),
+            MedicalEntry.created_at.desc(),
+            MedicalEntry.term.asc(),
+        ).all()
         return [_entry_dict(e) for e in entries]
 
 
@@ -248,12 +260,14 @@ def _json_from_text(text: str) -> dict[str, Any] | None:
 
 
 def _extract_medical_values(text: str) -> list[dict[str, str | None]]:
-    values: list[dict[str, str | None]] = []
     if not text.strip():
-        return values
+        return []
 
     lowered = re.sub(r"\s+", " ", text.lower())
-    for label, (term, default_unit) in KNOWN_TERMS.items():
+    matches: list[tuple[int, dict[str, str | None]]] = []
+    labels = sorted(KNOWN_TERMS, key=len, reverse=True)
+    for label in labels:
+        term, default_unit = KNOWN_TERMS[label]
         escaped = re.escape(label)
         pattern = rf"\b{escaped}\b[^0-9]{{0,40}}(\d+(?:\.\d+)?(?:/\d+(?:\.\d+)?)?)\s*([a-z%/]+)?"
         for match in re.finditer(pattern, lowered):
@@ -266,8 +280,15 @@ def _extract_medical_values(text: str) -> list[dict[str, str | None]]:
                 "unit": unit,
                 "status": status,
             }
-            if item not in values:
-                values.append(item)
+            matches.append((match.start(), item))
+
+    values: list[dict[str, str | None]] = []
+    seen_terms: set[str] = set()
+    for _, item in sorted(matches, key=lambda found: found[0]):
+        term = item["term"]
+        if term not in seen_terms:
+            values.append(item)
+            seen_terms.add(str(term))
 
     return values
 
@@ -390,7 +411,11 @@ def _summary_insights(
     profile: HealthProfile | None, entries: list[MedicalEntry]
 ) -> list[dict[str, str]]:
     insights: list[dict[str, str]] = []
-    abnormal = [e for e in entries if e.status in {"high", "low", "urgent"}]
+    severity_order = {"urgent": 0, "high": 1, "low": 2}
+    abnormal = sorted(
+        [e for e in entries if e.status in severity_order],
+        key=lambda entry: (severity_order[str(entry.status)], entry.term),
+    )
 
     if abnormal:
         latest = abnormal[0]

@@ -1,5 +1,6 @@
 import os
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -22,7 +23,8 @@ def upload_report(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}_{file.filename}")
+    filename = Path(file.filename or "report").name
+    file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}_{filename}")
     with open(file_path, "wb") as f:
         f.write(file.file.read())
 
@@ -35,7 +37,13 @@ def upload_report(
     db.commit()
     db.refresh(report)
 
-    result = analyze_report(file_path)
+    try:
+        result = analyze_report(file_path)
+    except Exception as exc:
+        report.status = "failed"
+        report.summary = "Report analysis failed. Please try uploading the file again."
+        db.commit()
+        raise HTTPException(status_code=500, detail="Report analysis failed") from exc
 
     report.status = "complete"
     report.summary = result["summary"]
@@ -72,7 +80,12 @@ def get_report(
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
 
-    flagged_values = db.query(MedicalEntry).filter_by(report_id=report.id).all()
+    flagged_values = (
+        db.query(MedicalEntry)
+        .filter_by(report_id=report.id)
+        .order_by(MedicalEntry.recorded_at.asc(), MedicalEntry.term.asc())
+        .all()
+    )
 
     return ReportResponse(
         id=report.id,

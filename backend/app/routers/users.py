@@ -1,14 +1,31 @@
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import TypeAdapter
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import HealthProfile, User
-from app.schemas import EmergencyContact, HealthProfileResponse, HealthProfileUpdate
+from app.schemas import (
+    EmergencyContact,
+    HealthProfileResponse,
+    HealthProfileUpdate,
+    Medication,
+)
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+medications_adapter = TypeAdapter(list[Medication])
+
+
+def _loads_json_field(value: str | None, default):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
 
 
 @router.get("/me", response_model=HealthProfileResponse)
@@ -35,8 +52,12 @@ def get_profile(
         sex=profile.sex,
         height_cm=profile.height_cm,
         weight_kg=profile.weight_kg,
-        conditions=json.loads(profile.conditions) if profile.conditions else None,
-        medications=json.loads(profile.medications) if profile.medications else None,
+        conditions=_loads_json_field(profile.conditions, None),
+        medications=medications_adapter.validate_python(
+            _loads_json_field(profile.medications, [])
+        )
+        if profile.medications
+        else None,
         emergency_contact=EmergencyContact(
             name=profile.emergency_contact_name,
             phone=profile.emergency_contact_phone,
@@ -58,7 +79,7 @@ def update_profile(
         profile = HealthProfile(user_id=current_user.id)
         db.add(profile)
 
-    updates = data.model_dump(exclude_unset=True)
+    updates = data.model_dump(mode="json", exclude_unset=True)
 
     if "medications" in updates:
         updates["medications"] = json.dumps(updates["medications"])

@@ -20,7 +20,12 @@ def get_dashboard(
     if not summary:
         return DashboardResponse(health_score=0, insights=[])
 
+    try:
+        insights = json.loads(summary.insights)
+    except json.JSONDecodeError:
+        insights = []
+
     return DashboardResponse(
         health_score=summary.health_score,
-        insights=json.loads(summary.insights),
+        insights=insights,
     )
