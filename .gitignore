@@ -1,19 +1,40 @@
-# Environment
-.env
-
-# Python
+# ---------- Python / backend ----------
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.pytest_cache/
 .venv/
 venv/
+env/
 
-# Uploaded files (runtime data, not source)
-uploads/
+# Environment variables (real secrets — never commit)
+backend/.env
+.env
+!*.env.example
+
+# Local databases
 *.db
+*.sqlite
+*.sqlite3
+healthos_test.db
 
-# Editor
+# Uploaded report files (user data — never commit)
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# ---------- Node / frontend ----------
+frontend/node_modules/
+node_modules/
+frontend/dist/
+dist/
+frontend/.env
+!frontend/.env.example
+
+# Vite / build cache
+.vite/
+
+# ---------- Editor / OS ----------
 .vscode/
 .idea/
-
-# OS
 .DS_Store
+Thumbs.db

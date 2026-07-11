@@ -99,6 +99,14 @@ class ReportResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ReportSummaryResponse(BaseModel):
+    id: uuid.UUID
+    status: str
+    risk_level: str | None = None
+    created_at: datetime
+    display_name: str
+
+
 class ReportUploadResponse(BaseModel):
     report_id: uuid.UUID
     status: str

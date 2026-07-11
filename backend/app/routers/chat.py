@@ -25,5 +25,5 @@ def chat(
         if not report:
             raise HTTPException(status_code=404, detail="Report not found")
 
-    reply = generate_chat_reply(db, current_user.id, data.message, data.report_id)
+    reply = generate_chat_reply(db, current_user, data.message, data.report_id)
     return ChatResponse(reply=reply)

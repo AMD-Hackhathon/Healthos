@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import os
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.ai_tools import analyze_report, generate_health_summary, utcnow
@@ -10,7 +13,12 @@ from app.auth import get_current_user
 from app.cache import invalidate_user_cache, response_cache
 from app.database import get_db
 from app.models import MedicalEntry, Report, User
-from app.schemas import MedicalEntryResponse, ReportResponse, ReportUploadResponse
+from app.schemas import (
+    MedicalEntryResponse,
+    ReportResponse,
+    ReportSummaryResponse,
+    ReportUploadResponse,
+)
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -72,6 +80,36 @@ def upload_report(
     return ReportUploadResponse(report_id=report.id, status=report.status)
 
 
+@router.get("", response_model=list[ReportSummaryResponse])
+def list_reports(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    reports = (
+        db.query(Report)
+        .filter_by(user_id=current_user.id)
+        .order_by(Report.created_at.desc())
+        .all()
+    )
+    return [
+        ReportSummaryResponse(
+            id=r.id,
+            status=r.status,
+            risk_level=r.risk_level,
+            created_at=r.created_at,
+            display_name=_display_name(r.file_path),
+        )
+        for r in reports
+    ]
+
+
+def _display_name(file_path: str) -> str:
+    # file_path is saved as "{uuid}_{original_filename}" — strip the uuid prefix
+    name = file_path.split("/")[-1]
+    parts = name.split("_", 1)
+    return parts[1] if len(parts) == 2 else name
+
+
 @router.get("/{report_id}", response_model=ReportResponse)
 def get_report(
     report_id: uuid.UUID,
@@ -104,3 +142,21 @@ def get_report(
     )
     response_cache.set(cache_key, response)
     return response
+
+
+@router.get("/{report_id}/file")
+def get_report_file(
+    report_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    report = db.query(Report).filter_by(id=report_id, user_id=current_user.id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if not os.path.exists(report.file_path):
+        raise HTTPException(status_code=404, detail="Original file not found")
+
+    return FileResponse(
+        report.file_path,
+        filename=_display_name(report.file_path),
+    )

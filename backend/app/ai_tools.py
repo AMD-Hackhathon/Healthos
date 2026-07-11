@@ -4,8 +4,8 @@ import json
 import mimetypes
 import re
 import uuid
-from hashlib import sha256
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from urllib import error, request
@@ -16,8 +16,7 @@ from sqlalchemy.orm import Session
 from app.cache import ai_cache, report_analysis_cache
 from app.config import settings
 from app.database import SessionLocal
-from app.models import ChatMessage, HealthProfile, MedicalEntry, Report
-
+from app.models import ChatMessage, HealthProfile, MedicalEntry, Report, User
 
 NORMAL_RISK = "normal"
 ADVICE_RISK = "advice"
@@ -111,8 +110,12 @@ def generate_health_summary(db: Session, user_id: uuid.UUID) -> None:
         .all()
     )
 
-    health_score = _health_score(profile, entries)
-    insights = _summary_insights(profile, entries)
+    ai_result = _generate_summary_with_fireworks(profile, entries)
+    if ai_result:
+        health_score, insights = ai_result
+    else:
+        health_score = _health_score(profile, entries)
+        insights = _summary_insights(profile, entries)
 
     summary = db.query(HealthSummary).filter_by(user_id=user_id).first()
     payload = json.dumps(insights)
@@ -129,8 +132,9 @@ def generate_health_summary(db: Session, user_id: uuid.UUID) -> None:
 
 
 def generate_chat_reply(
-    db: Session, user_id: uuid.UUID, message: str, report_id: uuid.UUID | None
+    db: Session, current_user: User, message: str, report_id: uuid.UUID | None
 ) -> str:
+    user_id = current_user.id
     history = (
         db.query(ChatMessage)
         .filter_by(user_id=user_id)
@@ -156,9 +160,13 @@ def generate_chat_reply(
         report = db.query(Report).filter_by(id=report_id, user_id=user_id).first()
 
     db.add(ChatMessage(user_id=user_id, role="user", content=message))
-    reply = _chat_with_fireworks(message, history, profile, entries, report)
+    reply = _chat_with_fireworks(
+        message, history, profile, entries, report, current_user.username
+    )
     if not reply:
-        reply = _deterministic_chat_reply(message, history, profile, entries, report)
+        reply = _deterministic_chat_reply(
+            message, history, profile, entries, report, current_user.username
+        )
     db.add(ChatMessage(user_id=user_id, role="assistant", content=reply))
     db.commit()
     return reply
@@ -181,6 +189,63 @@ def get_user_medical_history(
             MedicalEntry.term.asc(),
         ).all()
         return [_entry_dict(e) for e in entries]
+
+
+def _generate_summary_with_fireworks(
+    profile: HealthProfile | None, entries: list[MedicalEntry]
+) -> tuple[int, list[dict[str, str]]] | None:
+    if not settings.fireworks_api_key:
+        print("SUMMARY: no api key")
+        return None
+
+    context = {
+        "profile": _profile_dict(profile),
+        "recent_entries": [_entry_dict(e) for e in entries[:20]],
+    }
+    prompt = (
+        "You are a health scoring assistant. Based on the user's profile and recent "
+        "medical entries, produce a health score from 0-100 (100 = excellent, "
+        "lower = more concerns, weighted toward abnormal/urgent values and missing "
+        "profile data) and a short list of 2-4 plain-language insight lines a user "
+        "would see on a dashboard. Be cautious and conservative — do not diagnose.\n\n"
+        "Return JSON only, no other text, in this exact shape:\n"
+        '{"health_score": <int 0-100>, "insights": ['
+        '{"type": "status"|"trend"|"reminder"|"activity", "icon": "green"|"alert"|"pill"|"activity"|"profile", "text": "<short sentence>"}'
+        "]}\n\n"
+        f"Context JSON:\n{json.dumps(context, default=str)}"
+    )
+    content = _fireworks_chat(prompt, max_tokens=500)
+    if not content:
+        print("SUMMARY: content was empty/None")
+        return None
+
+    parsed = _json_from_text(content)
+    print("SUMMARY: parsed:", parsed)
+    if not parsed or "health_score" not in parsed or "insights" not in parsed:
+        print("SUMMARY: missing required keys")
+        return None
+
+    try:
+        score = max(0, min(100, int(parsed["health_score"])))
+    except (TypeError, ValueError) as e:
+        print("SUMMARY: score conversion failed:", e)
+        return None
+
+    insights = []
+    for item in parsed.get("insights") or []:
+        if isinstance(item, dict) and item.get("text"):
+            insights.append(
+                {
+                    "type": str(item.get("type") or "status"),
+                    "icon": str(item.get("icon") or "activity"),
+                    "text": str(item["text"]),
+                }
+            )
+    if not insights:
+        print("SUMMARY: no valid insights parsed")
+        return None
+
+    return score, insights[:5]
 
 
 def _extract_pdf_text(path: Path) -> str:
@@ -274,11 +339,13 @@ def _chat_with_fireworks(
     profile: HealthProfile | None,
     entries: list[MedicalEntry],
     report: Report | None,
+    user_name: str | None = None,
 ) -> str | None:
     if not settings.fireworks_api_key:
         return None
 
     context = {
+        "user_name": user_name,
         "profile": _profile_dict(profile),
         "recent_entries": [_entry_dict(e) for e in entries[:8]],
         "report": _report_dict(report),
@@ -288,11 +355,15 @@ def _chat_with_fireworks(
         "You are HealthOS assistant. Use only the supplied user health context. "
         "If there is not enough personal data, ask concise guiding questions. "
         "Do not diagnose. Give practical, cautious health information and advise "
-        "professional care for urgent or unclear concerns.\n\n"
+        "Keep your answer focused and under 150 words unless the user asks for detail."
+        "professional care for urgent or unclear concerns."
+        "You know the user's name from context — only use it if they ask for it "
+        "or it fits naturally; do not greet them by name in every reply."
+        "Reply in plain conversational text without markdown formatting, tables, or headers.\n\n"
         f"Context JSON:\n{json.dumps(context, default=str)}\n\n"
         f"User message: {message}"
     )
-    return _fireworks_chat(prompt, max_tokens=300)
+    return _fireworks_chat(prompt, max_tokens=500)
 
 
 def _fireworks_chat(prompt: str, max_tokens: int) -> str | None:
@@ -355,27 +426,48 @@ def _extract_medical_values(text: str) -> list[dict[str, str | None]]:
         return []
 
     lowered = re.sub(r"\s+", " ", text.lower())
-    matches: list[tuple[int, dict[str, str | None]]] = []
     labels = sorted(KNOWN_TERMS, key=len, reverse=True)
+
+    # Accept matches greedily, longest/most-specific label first, and reject any
+    # match whose text span overlaps one already accepted. This stops shorter
+    # labels (e.g. "hemoglobin", "blood pressure") from matching inside a longer
+    # label's text (e.g. "hemoglobin a1c", "systolic blood pressure") and
+    # producing a duplicate or garbled entry from the same source text.
+    accepted: list[tuple[int, int, dict[str, str | None]]] = []
+
+    def overlaps(start: int, end: int) -> bool:
+        return any(
+            not (end <= a_start or start >= a_end) for a_start, a_end, _ in accepted
+        )
+
     for label in labels:
         term, default_unit = KNOWN_TERMS[label]
         escaped = re.escape(label)
         pattern = rf"\b{escaped}\b[^0-9]{{0,40}}(\d+(?:\.\d+)?(?:/\d+(?:\.\d+)?)?)\s*([a-z%/]+)?"
         for match in re.finditer(pattern, lowered):
+            start, end = match.start(), match.end()
+            if overlaps(start, end):
+                continue
             raw_value = match.group(1)
             unit = match.group(2) or default_unit
             status = _status_for_value(term, raw_value)
-            item = {
-                "term": term,
-                "value": raw_value,
-                "unit": unit,
-                "status": status,
-            }
-            matches.append((match.start(), item))
+            accepted.append(
+                (
+                    start,
+                    end,
+                    {
+                        "term": term,
+                        "value": raw_value,
+                        "unit": unit,
+                        "status": status,
+                    },
+                )
+            )
 
+    accepted.sort(key=lambda found: found[0])
     values: list[dict[str, str | None]] = []
     seen_terms: set[str] = set()
-    for _, item in sorted(matches, key=lambda found: found[0]):
+    for _, _, item in accepted:
         term = item["term"]
         if term not in seen_terms:
             values.append(item)
@@ -475,9 +567,7 @@ def _coerce_report_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _health_score(
-    profile: HealthProfile | None, entries: list[MedicalEntry]
-) -> int:
+def _health_score(profile: HealthProfile | None, entries: list[MedicalEntry]) -> int:
     score = 90
     if not profile:
         score -= 10
@@ -562,7 +652,14 @@ def _deterministic_chat_reply(
     profile: HealthProfile | None,
     entries: list[MedicalEntry],
     report: Report | None,
+    user_name: str | None = None,
 ) -> str:
+    normalized = message.strip().lower()
+    if user_name and any(
+        term in normalized for term in ("my name", "who am i", "আমার নাম")
+    ):
+        return f"Your name is {user_name}."
+
     memory_reply = _chat_memory_reply(message, history)
     if memory_reply:
         return memory_reply
@@ -584,7 +681,10 @@ def _deterministic_chat_reply(
                 f"For this report, I found: {values}. "
                 f"Report risk is {report.risk_level or 'not set'}. {report.summary or ''}"
             ).strip()
-        return report.summary or "I found the report, but it has no structured values saved yet."
+        return (
+            report.summary
+            or "I found the report, but it has no structured values saved yet."
+        )
 
     abnormal = [e for e in entries if e.status in {"high", "low", "urgent"}]
     if abnormal:
