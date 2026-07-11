@@ -17,8 +17,8 @@ app.add_middleware(
         "http://localhost:5173",  # Vite default
         "http://127.0.0.1:3000",  # Create React App / Next default
         "http://localhost:3000",  # Create React App / Next default
-        "https://healthos-zrs1.vercel.app/",
     ],
+    allow_origin_regex=r"https://healthos.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
