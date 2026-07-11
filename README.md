@@ -73,7 +73,7 @@ DATABASE_URL=postgresql://user:password@localhost:5432/healthos
 SECRET_KEY=some-long-random-string
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=60
-FIREWORKS_API_KEY=            # optional — leave blank to use rule-based fallback
+FIREWORKS_API_KEY=your-api-key
 FIREWORKS_MODEL=accounts/fireworks/models/llama-v3p1-8b-instruct
 ```
 
